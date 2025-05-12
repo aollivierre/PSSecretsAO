@@ -3,16 +3,15 @@
 Creates a new encrypted secrets file.
 
 .DESCRIPTION
-Creates a new secrets file at the specified path. 
+Creates a new encrypted secrets file at the specified path using the provided data.
 It can use either Windows DPAPI (recommended, tied to user/machine) or a less secure shared key (for portability) for encryption.
-If the -Data parameter is provided, it encrypts the values in the hashtable and saves them.
-If -Data is not provided, it interactively prompts the user for TenantID, ClientID, and ClientSecret (using the chosen encryption method).
+It encrypts the string values in the input hashtable and saves them to the specified file.
 
 .PARAMETER FilePath
 The full path where the secrets file will be created.
 
 .PARAMETER Data
-A hashtable containing the key-value pairs to encrypt and save to the file.
+[Mandatory] A hashtable containing the key-value pairs to encrypt and save to the file.
 Values that are strings will be encrypted; other types will be stored as-is.
 
 .PARAMETER EncryptionMethod
@@ -22,11 +21,6 @@ Specifies the encryption method to use.
 
 .EXAMPLE
 New-SecretsFile -FilePath C:\temp\mysecrets.psd1
-# Prompts interactively, encrypts using DPAPI (default).
-
-.EXAMPLE
-$mySecrets = @{ ApiKey = 'abc'; Timeout = 30 }
-New-SecretsFile -FilePath C:\temp\apisecrets.psd1 -Data $mySecrets -EncryptionMethod Portable
 # Creates the file non-interactively with encrypted ApiKey (using shared key) and plain Timeout.
 
 .OUTPUTS
@@ -38,7 +32,7 @@ function New-SecretsFile {
         [Parameter(Mandatory = $true)]
         [string]$FilePath,
 
-        [Parameter()]
+        [Parameter(Mandatory = $true)]
         [hashtable]$Data,
 
         [Parameter()]
@@ -64,86 +58,33 @@ function New-SecretsFile {
     }
 
     $returnData = $null
-    $objectToSave = $null
     $encryptionMethodUsed = $EncryptionMethod # Use the parameter value for metadata
 
-    # Non-interactive mode: Use provided -Data
-    if ($PSBoundParameters.ContainsKey('Data')) {
-        Write-Verbose "Processing -Data parameter for non-interactive file creation using '$($EncryptionMethod)' method."
-        $encryptedData = @{}
-        foreach ($key in $Data.Keys) {
-            $value = $Data[$key]
-            # Only encrypt strings, store others as-is (simplistic approach)
-            if ($value -is [string]) {
-                 try {
-                     # Pass the determined protection type to Protect-String
-                     $encryptedData[$key] = Protect-String -String $value -ProtectionType $protectionTypeForFunc
-                 }
-                 catch {
-                      Write-Error "Failed to protect string for key '$key' using method '$($EncryptionMethod)'. Error: $($_.Exception.Message)"
-                      return $null # Indicate failure
-                 }
-            }
-            else {
-                 $encryptedData[$key] = $value
-                 Write-Warning "Value for key '$key' is not a string and was not encrypted."
-            }
+    # Process the mandatory -Data parameter
+    Write-Verbose "Processing -Data parameter for file creation using '$($EncryptionMethod)' method."
+    $encryptedData = @{}
+    foreach ($key in $Data.Keys) {
+        $value = $Data[$key]
+        # Only encrypt strings, store others as-is (simplistic approach)
+        if ($value -is [string]) {
+             try {
+                 # Pass the determined protection type to Protect-String
+                 $encryptedData[$key] = Protect-String -String $value -ProtectionType $protectionTypeForFunc
+             }
+             catch {
+                  Write-Error "Failed to protect string for key '$key' using method '$($EncryptionMethod)'. Error: $($_.Exception.Message)"
+                  return $null # Indicate failure
+             }
         }
-        $objectToSave = $encryptedData
-        $returnData = $Data # Return the original data
+        else {
+             $encryptedData[$key] = $value
+             Write-Warning "Value for key '$key' is not a string and was not encrypted."
+        }
     }
-    # Interactive mode: Prompt user (original behavior)
-    else {
-        Write-Host "`nCreating secrets file interactively: $FilePath (Encryption: $($EncryptionMethod))" -ForegroundColor Yellow
-        Write-Host "Please enter the following information:" -ForegroundColor Cyan
+    $objectToSave = $encryptedData
+    $returnData = $Data # Return the original data
 
-        $tenantId = Read-Host -Prompt "Enter your Tenant ID"
-        $clientId = Read-Host -Prompt "Enter your Application (Client) ID"
-        $clientSecretSecure = Get-SecureInput -Prompt "Enter your Client Secret"
-
-        # Check if Get-SecureInput returned a secure string
-        if ($null -eq $clientSecretSecure -or -not ($clientSecretSecure -is [System.Security.SecureString])) {
-            Write-Error "Failed to get secure input for Client Secret."
-            return $null
-        }
-
-        # Convert SecureString to plain text for encryption & return value
-        $BSTR = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($clientSecretSecure)
-        $plainSecret = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($BSTR)
-        [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($BSTR)
-
-        # Encrypt values for saving using the chosen method
-        try {
-             $encryptedTenantId = Protect-String -String $tenantId -ProtectionType $protectionTypeForFunc
-             $encryptedClientId = Protect-String -String $clientId -ProtectionType $protectionTypeForFunc
-             $encryptedClientSecret = Protect-String -String $plainSecret -ProtectionType $protectionTypeForFunc
-        }
-        catch {
-             Write-Error "Failed to protect one or more secret strings using method '$($EncryptionMethod)'. Error: $($_.Exception.Message)"
-             # Clear potentially sensitive variable
-             Clear-Variable plainSecret -ErrorAction SilentlyContinue
-             return $null
-        }
-
-        # Create object with encrypted values
-        $secretsToSave = @{
-            TenantID     = $encryptedTenantId
-            ClientID     = $encryptedClientId
-            ClientSecret = $encryptedClientSecret
-        }
-        $objectToSave = $secretsToSave
-
-        # Prepare plain text data for return
-        $returnData = @{
-            TenantID     = $tenantId
-            ClientID     = $clientId
-            ClientSecret = $plainSecret # Return the plain text version gathered
-        }
-        # Clear potentially sensitive variable after use
-        Clear-Variable plainSecret -ErrorAction SilentlyContinue
-    }
-
-    # Save the object (either from $Data or interactive prompts) to file
+    # Save the object to file
     if ($null -ne $objectToSave) {
          # Add metadata key for encryption method
          $metadataKey = '_PSSecretsAO_EncryptionMethod' # Choose a unique prefix
